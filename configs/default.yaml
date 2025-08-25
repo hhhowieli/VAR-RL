@@ -1,0 +1,23 @@
+
+model:
+  patch_num: [1, 2, 3, 4, 5, 6, 8, 10, 13, 16]
+
+  var:
+    num_classes: 1000
+    depth: 16
+    shared_aln: False
+    attn_l2_norm: True
+    flash_if_available: True
+    fused_if_available: True
+    init_adaln: 0.5
+    init_adaln_gamma: 1e-5
+    init_head: 0.02
+    init_std: -1
+
+  vqvae:
+    V: 4096
+    Cvae: 32
+    ch: 160
+    share_quant_resi: 4
+
+opt: adamw
