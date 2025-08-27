@@ -16,7 +16,7 @@ def sample_with_top_k_top_p_(logits_BlV: torch.Tensor, top_k: int = 0, top_p: fl
     # sample (have to squeeze cuz torch.multinomial can only be used for 2D tensor)
     replacement = num_samples >= 0
     num_samples = abs(num_samples)
-    return torch.multinomial(logits_BlV.softmax(dim=-1).view(-1, V), num_samples=num_samples, replacement=replacement, generator=rng).view(B, l, num_samples), 
+    return torch.multinomial(logits_BlV.softmax(dim=-1).view(-1, V), num_samples=num_samples, replacement=replacement, generator=rng).view(B, l, num_samples), logits_BlV
 
 
 def gumbel_softmax_with_rng(logits: torch.Tensor, tau: float = 1, hard: bool = False, eps: float = 1e-10, dim: int = -1, rng: torch.Generator = None) -> torch.Tensor:

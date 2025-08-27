@@ -190,10 +190,10 @@ class VAR(nn.Module):
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
 
 
-    def rlhf_infer_cfg(
+    def rlhf_sample_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
         g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
-        more_smooth=False,
+        more_smooth=False, prev_token_maps=None
     ) -> torch.Tensor:
         # ... 前面的代码保持不变 ...
         if g_seed is None: rng = None
@@ -212,19 +212,69 @@ class VAR(nn.Module):
         cur_L = 0
         f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
 
-        for b in self.blocks: b.attn.kv_caching(True)
+        # for b in self.blocks: b.attn.kv_caching(True)
+
+        f_hats = [f_hat]
+        next_token_maps = [next_token_map]
+        logits_BlVs = []
+        logits_BlVs_sampled = []
 
         # 使用封装的函数替换原来的循环体
         for si, pn in enumerate(self.patch_nums):
-            cur_L, f_hat, next_token_map = self._autoregressive_infer_cfg_step(
+            cur_L, f_hat, next_token_map, logits_BlV, logits_BlV_sampled = self._rlhf_infer_cfg_step(
                 si, pn, B, cond_BD, lvl_pos, cur_L, f_hat, next_token_map,
                 rng, cfg, top_k, top_p, more_smooth
             )
+            f_hats.append(f_hat)
+            next_token_maps.append(next_token_map)
+            logits_BlVs.append(logits_BlV)
+            logits_BlVs_sampled.append(logits_BlV_sampled)
 
-        for b in self.blocks: b.attn.kv_caching(False)
-        return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)
+        # for b in self.blocks: b.attn.kv_caching(False)
+        return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5), f_hats, next_token_maps, logits_BlVs, logits_BlVs_sampled
 
-    def _autoregressive_infer_cfg_step(
+    def grpo_step_infer_cfg(
+        self, B, lable_B, g_seed, prev_f_hats, prev_token_map, cfg, top_k, top_p, more_smooth
+    ):
+        if g_seed is None: rng = None
+        else: self.rng.manual_seed(g_seed); rng = self.rng
+
+        if label_B is None:
+            label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
+        elif isinstance(label_B, int):
+            label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.lvl_1L.device)
+
+        sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
+
+        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC
+        # next_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]
+
+        cur_L = 0
+        f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
+
+        # # 使用封装的函数替换原来的循环体
+        # for si, pn in enumerate(self.patch_nums):
+        #     cur_L, f_hat, next_token_map, logits_BlV, logits_BlV_sampled = self._rlhf_infer_cfg_step(
+        #         si, pn, B, cond_BD, lvl_pos, cur_L, f_hat, next_token_map,
+        #         rng, cfg, top_k, top_p, more_smooth
+        #     )
+
+        logits_BlVs = []
+        logits_BlVs_sampled = []
+        i = 0
+        for f_hat, token_map in zip(prev_f_hats, prev_token_maps):
+            si, pn = i, self.patch_nums[i]
+            cur_L, _, _, logits_BlV, logits_BlV_sampled = self._rlhf_infer_cfg_step(
+                si, pn, B, cond_BD, lvl_pos, cur_L, f_hat, token_map,
+                rng, cfg, top_k, top_p, more_smooth
+            )
+            logits_BlVs.append(logits_BlV)
+            logits_BlVs_sampled.append(logits_BlV_sampled)
+
+        return logits_BlVs, logits_BlVs_sampled
+
+
+    def _rlhf_infer_cfg_step(
         self, si, pn, B, cond_BD, lvl_pos, cur_L, f_hat, next_token_map,
         rng, cfg, top_k, top_p, more_smooth, logits_BlV=None
     ):
@@ -237,12 +287,12 @@ class VAR(nn.Module):
         AdaLNSelfAttn.forward
         for b in self.blocks:
             x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-        logits_BlV = self.get_logits(x, cond_BD) if logits_BlV is None else logits_BlV
+        logits_BlV = self.get_logits(x, cond_BD)
 
         t = cfg * ratio
         logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
 
-        idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+        idx_Bl, logits_BlV_sampled = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
 
         if not more_smooth:
             h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)
@@ -258,7 +308,7 @@ class VAR(nn.Module):
             next_token_map = self.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + self.patch_nums[si+1] ** 2]
             next_token_map = next_token_map.repeat(2, 1, 1)
 
-        return cur_L, f_hat, next_token_map, logits_BlV
+        return cur_L, f_hat, next_token_map, logits_BlV, logits_BlV_sampled
 
 
     def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV

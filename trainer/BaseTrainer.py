@@ -77,7 +77,7 @@ class BaseTrainer(object):
         self,
         device,
         config,
-        reward_func = None,
+        reward_model = None,
     ):
         self.device = device
         self.cfg = config
@@ -131,7 +131,7 @@ class BaseTrainer(object):
         self.var_opt = var_optim
         self.vae_local = vae_local
 
-        self.reward_func = reward_func
+        self.RM = reward_model
 
     def train_step(self):
 

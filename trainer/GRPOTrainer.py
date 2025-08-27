@@ -10,38 +10,60 @@ class GRPOTrainer(BaseTrainer):
         self,
         device,
         config,
-        reward_func = None,
+        reward_model = None,
     ):
-        super().__init__(device, config, reward_func)
+        super().__init__(device, config, reward_model)
 
-    def sample_step(
+    @torch.no_grad()
+    def sample_reference_model(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
         g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
-        more_smooth=False, grpo=False, init=False
+        more_smooth=False
     ):
-        if init:
-            rng, cond_BD, cur_L, f_hat_0, next_token_map_0 = self.rlhf_prestep(B, label_B)
+        images, f_hats, next_token_maps, logits_BlVs, logits_BlVs_sampled = self.var.rlhf_sample_infer_cfg(
+            B, label_B, g_seed, cfg, top_k, top_p, more_smooth
+        )
 
-    def sample_reference_model(
-        self,B
+        rewards = self.RM(images)
+        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-4)
+        
+        samples = {
+            "f_hats": f_hats,
+            "logits_BlVs": logits_BlVs,
+            "next_token_maps": next_token_maps,
+            "rewards": rewards,
+        }
+
+        return samples
+
+    def train_step(
+        self,
+        loader,
+        optimizer,
     ):
-        batch_size = 1
-        batch_indices = torch.chunk(torch.arange(B), B // batch_size)
+        total_loss = 0.0
+        kl_total_loss = 0.0
+        policy_total_loss = 0.0
+        total_clip_frac = 0.0
+        optimizer.zero_grad()
+        (
+            labels
+        ) = next(loader)
 
-        all_log_probs = []
-        all_rewards = []  
-        all_multi_rewards = {}
-        all_image_ids = []
+        B = 25
 
-        if dist.get_rank() == 0:
-            sampling_time = 0
-        for index, batch_idx in enumerate(batch_indices): # len(batch_indices)=12
-            if dist.get_rank() == 0:
-                meta_sampling_time = time.time()
+        seed = 0
 
-        batch_caption = [caption[i] for i in batch_idx]
+        samples = self.sample_reference_model(
+            B=B*2, label_B=labels, g_seed=seed, cfg=4, top_k=900, top_p=0.95
+        )
 
-    def train_step(self):
-        pass
+        prev_token_maps = samples["next_token_maps"]
+        prev_f_hats = samples["f_hats"]
+
+        logits_BlVs, logits_BlVs_sampled = self.var.grpo_step_infer_cfg(
+            B=B*2, label_B=labels, g_seed=seed, prev_f_hats=prev_f_hats, prev_token_maps=prev_token_maps, cfg=4, top_k=900, top_p=0.95
+        )
+
 
 
